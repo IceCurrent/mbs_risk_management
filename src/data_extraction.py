@@ -114,8 +114,10 @@ ORIG_DTYPES: Dict[str, str] = {
 
 PERF_DTYPES: Dict[str, str] = {
     "current_upb":           "float32",
+    "delinquency_status":    "str",    # can be '0','1','2','3','RA' — must be str
     "loan_age":              "Int16",
     "months_remaining":      "Int16",
+    "zero_balance_code":     "str",    # '01','02','03','06','09' — leading zeros
     "current_interest_rate": "float32",
     "current_deferred_upb":  "float32",
     "eltv":                  "float32",
@@ -308,6 +310,101 @@ def parse_all_origination(
     combined.to_parquet(all_path, index=False)
     log.info(
         "origination_all.parquet: %d rows, %d cols → %s",
+        *combined.shape, all_path.name,
+    )
+    return all_path
+
+
+# ── Phase 2b — Performance parsing ───────────────────────────────────────────
+
+def parse_performance_quarter(
+    year: int,
+    quarter: int,
+    zip_path: Path,
+    out_dir: Path,
+) -> Path:
+    """
+    Parse the performance file for one quarter and save as parquet.
+
+    Skips writing if the output file already exists.
+
+    Parameters
+    ----------
+    year : int
+    quarter : int
+    zip_path : Path  Path to the quarterly zip archive.
+    out_dir : Path   Directory to write the output parquet file.
+
+    Returns
+    -------
+    Path  Path to the written (or pre-existing) parquet file.
+    """
+    tag = f"{year}Q{quarter}"
+    out_path = out_dir / f"performance_{tag}.parquet"
+
+    if out_path.exists():
+        log.info("Already exists, skipping: %s", out_path)
+        return out_path
+
+    member = f"historical_data_time_{year}Q{quarter}.txt"
+    label = f"performance_{tag}"
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            frame = _read_pipe_delimited(
+                archive, member, PERF_COLS, PERF_DTYPES, label
+            )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to parse {label} from {zip_path}: {exc}"
+        ) from exc
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(out_path, index=False)
+    log.info("Saved %s: %d rows → %s", label, len(frame), out_path.name)
+    return out_path
+
+
+def parse_all_performance(
+    years: range = range(2018, 2026),
+    out_dir: Optional[Path] = None,
+) -> Path:
+    """
+    Parse all performance files for the given years into quarterly parquets.
+
+    Saves each quarter individually, then concatenates into
+    performance_all.parquet. Already-processed quarters are skipped.
+
+    Parameters
+    ----------
+    years : range  Years to process (default 2018-2025).
+    out_dir : Path  Output directory (default data/processed/).
+
+    Returns
+    -------
+    Path  Path to performance_all.parquet.
+    """
+    if out_dir is None:
+        out_dir = PROJECT_ROOT / "data" / "processed"
+
+    zip_files = _find_zip_files(years)
+    if not zip_files:
+        raise FileNotFoundError(
+            f"No zip files found for years {list(years)}. "
+            "Expected: PROJECT_ROOT/historical_data_YYYY/historical_data_YYYYQn.zip"
+        )
+
+    paths = []
+    for year, qtr, zip_path in zip_files:
+        paths.append(parse_performance_quarter(year, qtr, zip_path, out_dir))
+
+    combined = pd.concat(
+        [pd.read_parquet(p) for p in paths], ignore_index=True
+    )
+    all_path = out_dir / "performance_all.parquet"
+    combined.to_parquet(all_path, index=False)
+    log.info(
+        "performance_all.parquet: %d rows, %d cols → %s",
         *combined.shape, all_path.name,
     )
     return all_path
