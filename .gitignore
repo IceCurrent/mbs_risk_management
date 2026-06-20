@@ -1,0 +1,61 @@
+# Environment — NEVER commit credentials
+.env
+
+# Raw Freddie Mac data — large and under license
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/zips/.gitkeep
+historical_data_*/
+
+# Processed large files
+data/processed/*.csv
+data/processed/*.csv.gz
+data/processed/*.parquet
+
+# FRED cached data (re-fetchable)
+data/fred/*
+!data/fred/.gitkeep
+
+# Artifacts — serialized models and figures (regenerate from code)
+artifacts/models/
+artifacts/figures/
+artifacts/results/
+
+# Personal audit trail — not for the repo
+PROGRESS.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Large files (safety net)
+*.zip
+*.gz
+*.tar
+*.tar.gz
