@@ -408,3 +408,115 @@ def parse_all_performance(
         *combined.shape, all_path.name,
     )
     return all_path
+
+
+# ── Phase 2c — Merge panel and model-specific subsets ────────────────────────
+
+def build_merged_panel(
+    orig_path: Optional[Path] = None,
+    perf_path: Optional[Path] = None,
+    out_dir: Optional[Path] = None,
+) -> Path:
+    """
+    Join origination (static, one row per loan) with performance
+    (monthly, many rows per loan) on loan_id.
+
+    The join is a left join on the performance side — every performance
+    row is kept and origination fields are broadcast to all its monthly
+    observations. Saves as merged_panel.parquet.
+
+    Parameters
+    ----------
+    orig_path : Path  origination_all.parquet (default data/processed/)
+    perf_path : Path  performance_all.parquet (default data/processed/)
+    out_dir : Path    Output directory (default data/processed/)
+
+    Returns
+    -------
+    Path  Path to merged_panel.parquet.
+    """
+    if out_dir is None:
+        out_dir = PROJECT_ROOT / "data" / "processed"
+    if orig_path is None:
+        orig_path = out_dir / "origination_all.parquet"
+    if perf_path is None:
+        perf_path = out_dir / "performance_all.parquet"
+
+    try:
+        orig = pd.read_parquet(orig_path)
+        perf = pd.read_parquet(perf_path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Input file not found: {exc}. "
+            "Run parse_all_origination() and parse_all_performance() first."
+        ) from exc
+
+    # Normalize loan_id to plain string in both tables
+    orig["loan_id"] = orig["loan_id"].astype(str).str.strip()
+    perf["loan_id"] = perf["loan_id"].astype(str).str.strip()
+
+    panel = perf.merge(orig, on="loan_id", how="left", suffixes=("", "_orig"))
+
+    out_path = out_dir / "merged_panel.parquet"
+    panel.to_parquet(out_path, index=False)
+    log.info("merged_panel.parquet: %d rows, %d cols", *panel.shape)
+    return out_path
+
+
+def create_model_subsets(
+    panel_path: Optional[Path] = None,
+    out_dir: Optional[Path] = None,
+) -> Dict[str, Path]:
+    """
+    Create model-specific filtered panels from the merged panel (spec §4.6).
+
+    Applies date filters immediately after loading, before any feature
+    engineering or modeling. Each notebook loads its own pre-filtered file.
+
+    Saves:
+      panel_logistic_2021_2025.parquet  — logistic regression + PSA model
+        (2021–2025 originations; richest macro-regime variation)
+      panel_cph_2018_2025.parquet       — Cox PH survival model
+        (2018–2025 originations; enough time to observe full default hump)
+
+    Parameters
+    ----------
+    panel_path : Path  merged_panel.parquet (default data/processed/)
+    out_dir : Path     Output directory (default data/processed/)
+
+    Returns
+    -------
+    dict  {'logistic': Path, 'cph': Path}
+    """
+    if out_dir is None:
+        out_dir = PROJECT_ROOT / "data" / "processed"
+    if panel_path is None:
+        panel_path = out_dir / "merged_panel.parquet"
+
+    try:
+        panel = pd.read_parquet(panel_path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Merged panel not found: {exc}. Run build_merged_panel() first."
+        ) from exc
+
+    panel["reporting_period"] = pd.to_datetime(
+        panel["reporting_period"].astype(str), format="%Y%m", errors="coerce"
+    )
+    panel["orig_quarter"] = pd.to_datetime(
+        panel["first_payment_date"].astype(str), format="%Y%m", errors="coerce"
+    ).dt.to_period("Q")
+
+    # Logistic regression + PSA: 2021-2025 originations (spec §4.6)
+    panel_logistic = panel[panel["orig_quarter"] >= "2021Q1"].copy()
+    logistic_path = out_dir / "panel_logistic_2021_2025.parquet"
+    panel_logistic.to_parquet(logistic_path, index=False)
+    log.info("panel_logistic_2021_2025.parquet: %d rows", len(panel_logistic))
+
+    # Cox PH: 2018-2025 originations (spec §4.6)
+    panel_cph = panel[panel["orig_quarter"] >= "2018Q1"].copy()
+    cph_path = out_dir / "panel_cph_2018_2025.parquet"
+    panel_cph.to_parquet(cph_path, index=False)
+    log.info("panel_cph_2018_2025.parquet: %d rows", len(panel_cph))
+
+    return {"logistic": logistic_path, "cph": cph_path}
