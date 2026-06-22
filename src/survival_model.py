@@ -20,17 +20,28 @@ try:
 except ImportError:
     _HAS_LIFELINES = False
 
-# Covariates for the Cox PH model (spec §5.3) — using z-score standardized columns
+# Covariates for the Cox PH model (spec §5.3) — using z-score standardized columns.
+#
+# ORIGINATION-ONLY: every covariate is known at loan origination, so the model
+# ranks risk without look-ahead. The earlier feature set additionally included
+# delinq_last, eltv_last, current_rate and current_upb — all measured at the
+# loan's LAST observation, which for a defaulted loan is the default month
+# itself. Those leak the outcome and inflated the C-index from ~0.77 to ~0.91.
+# They are kept below in CPH_FEATURE_COLS_LEAKY only to *demonstrate* the leak.
 CPH_FEATURE_COLS = [
     "fico_z",
     "orig_cltv_z",
     "orig_dti_z",
-    "current_rate_z",
-    "eltv_last_z",
     "log_orig_upb",
-    "log_current_upb",
     "occ_investment",
     "occ_second",
+]
+
+# DO NOT USE for inference — retained to quantify the leakage (see notebook 04).
+CPH_FEATURE_COLS_LEAKY = CPH_FEATURE_COLS + [
+    "current_rate_z",
+    "eltv_last_z",
+    "log_current_upb",
     "delinq_last",
 ]
 

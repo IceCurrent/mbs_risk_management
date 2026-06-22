@@ -197,13 +197,30 @@ def fit_psa_speed(monthly_cpr: pd.DataFrame) -> float:
 
 
 # ── Rate-dependent CPR ────────────────────────────────────────────────────────
+#
+# Calibrated S-curve parameters (see calibrate_scurve_from_pool_cpr).
+#   k_min  — turnover floor; set so deeply out-of-the-money CPR ≈ observed
+#            pool CPR (~1.3% over 2022-25, a lock-in environment), i.e.
+#            k_min = observed_cpr / 0.06 ≈ 0.21.
+#   alpha  — intercept set so k(RI=0) = 1.0 (at-the-money ≈ 100% PSA).
+#   k_max, beta — refinancing response, set from PSA convention because the
+#            sample contains NO in-the-money episodes to fit against (every
+#            loan in 2022-25 was deeply OTM).  beta=200 (refi incentive in
+#            decimal) gives a realistic S-curve: a 100bp rally roughly triples
+#            CPR.  The original beta=8 made CPR essentially rate-insensitive,
+#            which suppressed the prepayment option and the negative convexity.
+DEFAULT_K_MIN = 0.21
+DEFAULT_K_MAX = 6.0
+DEFAULT_ALPHA = -1.848   # logit((1 - k_min)/(k_max - k_min)) so k(0)=1.0
+DEFAULT_BETA  = 200.0
+
 
 def rate_dependent_psa_k(
     refinancing_incentive: np.ndarray,
-    k_min: float = 0.5,
-    k_max: float = 3.0,
-    alpha: float = -0.04,
-    beta:  float = 8.0,
+    k_min: float = DEFAULT_K_MIN,
+    k_max: float = DEFAULT_K_MAX,
+    alpha: float = DEFAULT_ALPHA,
+    beta:  float = DEFAULT_BETA,
 ) -> np.ndarray:
     """
     Logistic PSA speed multiplier as a function of refinancing incentive (spec §6.4).
@@ -219,7 +236,7 @@ def rate_dependent_psa_k(
     refinancing_incentive : np.ndarray  coupon - current_mortgage_rate (decimal).
     k_min, k_max : float  Bounds on PSA multiplier.
     alpha : float         Logistic intercept (shifts inflection point).
-    beta : float          Steepness of S-curve.
+    beta : float          Steepness of S-curve (RI in decimal).
 
     Returns
     -------
@@ -229,13 +246,51 @@ def rate_dependent_psa_k(
     return k_min + (k_max - k_min) / (1.0 + np.exp(-(alpha + beta * refi_inc)))
 
 
+def calibrate_scurve_from_pool_cpr(
+    observed_cpr_floor: float,
+    psa_flat: float = 0.06,
+    k_max: float = DEFAULT_K_MAX,
+    beta: float = DEFAULT_BETA,
+    atm_k: float = 1.0,
+) -> dict:
+    """
+    Calibrate the rate-dependent S-curve from the observed pool CPR (spec §6.4).
+
+    The Freddie Mac sample (2022-25) is dominated by deeply out-of-the-money,
+    low-coupon vintages during the rate lock-in, so only the *floor* (turnover at
+    deeply negative refinancing incentive) is empirically identifiable.  We:
+
+    - set ``k_min`` so deeply-OTM CPR matches the observed floor
+      (k_min = observed_cpr_floor / psa_flat), and
+    - set ``alpha`` so the at-the-money speed k(RI=0) equals ``atm_k`` (100% PSA).
+
+    ``k_max`` and ``beta`` (the in-the-money refinancing response) are supplied
+    from PSA convention because the sample has no in-the-money observations.
+
+    Parameters
+    ----------
+    observed_cpr_floor : float  Mean observed pool CPR in the OTM/lock-in regime.
+    psa_flat : float            Flat 100% PSA CPR (0.06).
+    k_max, beta : float         Refinancing-response priors.
+    atm_k : float               Target k at RI=0 (1.0 = 100% PSA).
+
+    Returns
+    -------
+    dict with keys k_min, k_max, alpha, beta.
+    """
+    k_min = observed_cpr_floor / psa_flat
+    ratio = np.clip((atm_k - k_min) / (k_max - k_min), 1e-6, 1 - 1e-6)
+    alpha = float(np.log(ratio / (1.0 - ratio)))
+    return {"k_min": float(k_min), "k_max": float(k_max), "alpha": alpha, "beta": float(beta)}
+
+
 def compute_cpr_paths(  # pylint: disable=too-many-arguments
     mortgage_rate_paths: np.ndarray,
     coupon: float,
-    k_min: float = 0.5,
-    k_max: float = 3.0,
-    alpha: float = -0.04,
-    beta:  float = 8.0,
+    k_min: float = DEFAULT_K_MIN,
+    k_max: float = DEFAULT_K_MAX,
+    alpha: float = DEFAULT_ALPHA,
+    beta:  float = DEFAULT_BETA,
 ) -> np.ndarray:
     """
     Generate rate-dependent CPR paths for Monte Carlo simulation (spec §6.4).

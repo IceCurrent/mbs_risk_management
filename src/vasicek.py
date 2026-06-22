@@ -292,6 +292,67 @@ def mortgage_rate_from_short(  # pylint: disable=too-many-arguments
     return zcb_yield + mbs_spread
 
 
+# ── Risk-neutral measure (market price of risk) ───────────────────────────────
+#
+# Calibration on GS1 recovers the *physical* (P) parameters that describe how
+# rates actually evolve.  Discounting cash flows for PRICING must be done under
+# the *risk-neutral* (Q) measure, whose drift carries a term premium.  With a
+# constant market price of risk λ the Vasicek drift becomes
+#     dr = κ(θ_P − r)dt − λσ dt + σ dW^Q = κ(θ_Q − r)dt + σ dW^Q,
+# i.e. only the long-run mean changes:  θ_Q = θ_P − λσ/κ.
+#
+# Notebooks 06–07 (forecasting where rates will actually go) use θ_P.
+# The pricer (notebook 08) uses θ_Q so the discount curve is realistic.
+
+def calibrate_risk_neutral_theta(
+    short_rate: float,
+    kappa: float,
+    sigma: float,
+    target_yield: float,
+    maturity: float = 10.0,
+) -> float:
+    """
+    Solve the risk-neutral long-run mean θ_Q so the model zero yield at a chosen
+    maturity matches a target (e.g. the current 10Y Treasury).
+
+    The physical curve calibrated on the 1Y rate is far too low at the long end
+    (the σ²/2κ² convexity drag pulls 30Y zeros below the short rate), which
+    over-discounts and inflates MBS prices.  Pinning θ_Q to a realistic long
+    yield restores an upward-sloping discount curve.
+
+    Parameters
+    ----------
+    short_rate : float    Current short rate r₀.
+    kappa, sigma : float  Calibrated mean-reversion speed and volatility.
+    target_yield : float  Target zero yield at ``maturity`` (decimal).
+    maturity : float      Maturity at which to match (years; default 10).
+
+    Returns
+    -------
+    float  θ_Q (risk-neutral long-run mean, decimal).
+    """
+    low, high = -0.05, 0.20
+    for _ in range(100):
+        mid = 0.5 * (low + high)
+        if vasicek_yield(short_rate, kappa, mid, sigma, maturity) < target_yield:
+            low = mid
+        else:
+            high = mid
+    return 0.5 * (low + high)
+
+
+def implied_market_price_of_risk(
+    theta_p: float, theta_q: float, kappa: float, sigma: float
+) -> float:
+    """
+    Back out the constant market price of risk λ from θ_P and θ_Q.
+
+    θ_Q = θ_P − λσ/κ  ⇒  λ = −(θ_Q − θ_P)·κ/σ.  A negative λ corresponds to a
+    positive term premium (risk-neutral rates drift above physical).
+    """
+    return -(theta_q - theta_p) * kappa / sigma
+
+
 # ── Summary statistics ────────────────────────────────────────────────────────
 
 def long_run_distribution(
