@@ -12,7 +12,7 @@ Implements:
 """
 
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -77,24 +77,26 @@ def load_and_calibrate(
     -------
     Tuple (kappa, theta, sigma, r0) where r0 is the most recent short rate.
     """
-    try:
-        from fredapi import Fred as _Fred  # pylint: disable=import-outside-toplevel
-    except ImportError as exc:
-        raise ImportError("fredapi not installed. Run: pip install fredapi") from exc
-
-    import os  # pylint: disable=import-outside-toplevel
-    from dotenv import load_dotenv  # pylint: disable=import-outside-toplevel
-    load_dotenv()
-
-    api_key = os.environ.get("FRED_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "FRED_API_KEY not set. Add it to .env and call load_dotenv() first."
-        )
-
+    # Prefer the cache: it lets the downstream notebooks (06-08) run with no
+    # FRED API key. Only require a key when we actually have to hit the API.
     if cache_path is not None and Path(cache_path).exists():
         gs1_series = pd.read_csv(cache_path, index_col=0, parse_dates=True).squeeze()
     else:
+        try:
+            from fredapi import Fred as _Fred  # pylint: disable=import-outside-toplevel
+        except ImportError as exc:
+            raise ImportError("fredapi not installed. Run: pip install fredapi") from exc
+
+        import os  # pylint: disable=import-outside-toplevel
+        from dotenv import load_dotenv  # pylint: disable=import-outside-toplevel
+        load_dotenv()
+
+        api_key = os.environ.get("FRED_API_KEY")
+        if not api_key:
+            raise EnvironmentError(
+                "FRED_API_KEY not set. Add it to .env and call load_dotenv() first."
+            )
+
         fred = _Fred(api_key=api_key)
         gs1_series = fred.get_series("GS1", start=start, end=end).dropna()
         gs1_series = gs1_series.resample("MS").last()
@@ -292,7 +294,9 @@ def mortgage_rate_from_short(  # pylint: disable=too-many-arguments
 
 # ── Summary statistics ────────────────────────────────────────────────────────
 
-def long_run_distribution(kappa: float, theta: float, sigma: float) -> Dict[str, float]:
+def long_run_distribution(
+    kappa: float, theta: float, sigma: float
+) -> Tuple[float, float, float]:
     """
     Analytical long-run (stationary) distribution of the Vasicek model (spec §7.1).
 
@@ -304,11 +308,7 @@ def long_run_distribution(kappa: float, theta: float, sigma: float) -> Dict[str,
 
     Returns
     -------
-    dict  {'mean': θ, 'std': σ/sqrt(2κ), 'var': σ²/2κ}
+    Tuple (mean, std, var) = (θ, σ/sqrt(2κ), σ²/2κ).
     """
     variance = sigma ** 2 / (2.0 * kappa)
-    return {
-        "mean": theta,
-        "std":  np.sqrt(variance),
-        "var":  variance,
-    }
+    return theta, float(np.sqrt(variance)), variance

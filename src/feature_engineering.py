@@ -152,6 +152,13 @@ def build_logistic_features(
     Collapses the monthly panel to one row per loan. The target is whether
     the loan ever reached 90+ DPD or a terminal zero-balance code.
 
+    .. warning::
+       This collapses the full monthly panel in-memory with a pandas groupby.
+       The production logistic panel (329M rows, 3.7 GB) OOM-kills a 16 GB
+       kernel — use ``build_model_aggregates.py`` to precompute the loan-level
+       table out-of-core and call :func:`build_logistic_features_from_loan_level`
+       instead. This function is retained for small panels / unit tests.
+
     Parameters
     ----------
     panel : pd.DataFrame  Monthly panel (2021-2025 per spec §4.6).
@@ -184,6 +191,36 @@ def build_logistic_features(
         last_period        = ("reporting_period",   "max"),
         default            = ("default",            "max"),
     ).reset_index()
+
+    return build_logistic_features_from_loan_level(loan, macro)
+
+
+def build_logistic_features_from_loan_level(
+    loan: pd.DataFrame,
+    macro: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Derive logistic features from a precomputed loan-level table (spec §5.2).
+
+    Takes one-row-per-loan output (from ``build_model_aggregates.py`` or the
+    groupby in :func:`build_logistic_features`) and adds clipped/imputed
+    covariates, binary flags, the origination-quarter macro join, interaction
+    terms, and occupancy/borrower-count dummies. This part is cheap — it runs
+    on ~9M loan rows, not the ~329M-row monthly panel.
+
+    Parameters
+    ----------
+    loan : pd.DataFrame  One row per loan. Required columns: loan_id,
+        credit_score, ltv, cltv, dti, orig_interest_rate, orig_loan_term,
+        property_state, occupancy_status, n_borrowers, orig_quarter,
+        max_loan_age, last_period, default.
+    macro : pd.DataFrame  Quarterly macro features from fetch_macro_quarterly().
+
+    Returns
+    -------
+    pd.DataFrame  One row per loan with all features and 'default' target.
+    """
+    loan = loan.copy()
 
     # ── Loan-level features (spec §5.2) ──────────────────────────────────────
 
@@ -276,6 +313,14 @@ def build_survival_features(panel: pd.DataFrame) -> pd.DataFrame:
     Applies LOCF imputation for eltv (populated only when delinquent),
     encodes delinquency ordinal, and standardizes continuous covariates.
 
+    .. warning::
+       This sorts and groups the full monthly panel in-memory. The production
+       CPH panel (592M rows, 6.7 GB) OOM-kills a 16 GB kernel — use
+       ``build_model_aggregates.py`` to precompute the loan-level survival
+       table out-of-core and call
+       :func:`build_survival_features_from_loan_level` instead. This function
+       is retained for small panels / unit tests.
+
     Parameters
     ----------
     panel : pd.DataFrame  Monthly panel (2018-2025 per spec §4.6).
@@ -311,6 +356,31 @@ def build_survival_features(panel: pd.DataFrame) -> pd.DataFrame:
         current_rate   = ("current_interest_rate", "last"),
         current_upb    = ("current_upb",        "last"),
     ).reset_index()
+
+    return build_survival_features_from_loan_level(survival)
+
+
+def build_survival_features_from_loan_level(survival: pd.DataFrame) -> pd.DataFrame:
+    """
+    Finalize Cox PH features from a precomputed loan-level survival table (spec §5.3).
+
+    Takes one-row-per-loan survival tuples (from ``build_model_aggregates.py``
+    or the groupby in :func:`build_survival_features`) and applies median
+    imputation, z-score standardization, and log transforms. Runs on ~15M loan
+    rows, not the ~592M-row monthly panel.
+
+    Parameters
+    ----------
+    survival : pd.DataFrame  One row per loan. Required columns: loan_id,
+        duration, event, fico, orig_cltv, orig_dti, orig_upb, orig_term,
+        occ_investment, occ_second, delinq_last, eltv_last, current_rate,
+        current_upb.
+
+    Returns
+    -------
+    pd.DataFrame  One row per loan with standardized covariates ready for Cox PH.
+    """
+    survival = survival.copy()
 
     # Impute missing values
     for col in ["orig_cltv", "orig_dti", "fico", "eltv_last"]:

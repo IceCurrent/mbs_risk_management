@@ -150,6 +150,44 @@ def cox_c_index(
     )
 
 
+def stratified_subsample(
+    survival_df: pd.DataFrame,
+    n_target: int = 2_000_000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """
+    Draw an event-stratified subsample of the survival dataset.
+
+    The full CPH panel resolves to ~15M loans. Fitting lifelines.CoxPHFitter on
+    that many rows is prohibitively memory- and time-intensive on a 16 GB
+    machine. Subsampling while preserving the (rare) event rate keeps the fit
+    tractable without materially degrading the partial-likelihood estimates or
+    the C-index. If ``n_target`` >= len(survival_df), the input is returned
+    unchanged.
+
+    Parameters
+    ----------
+    survival_df : pd.DataFrame  From build_survival_features*(); must have 'event'.
+    n_target : int              Approximate number of loans to retain.
+    seed : int                  RNG seed for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame  Subsample preserving the original event rate (shuffled).
+    """
+    if n_target >= len(survival_df):
+        return survival_df
+
+    frac = n_target / len(survival_df)
+    parts = [
+        group.sample(frac=frac, random_state=seed)
+        for _, group in survival_df.groupby(EVENT_COL)
+    ]
+    sampled = pd.concat(parts)
+    # Shuffle so the downstream random split sees no event-ordering structure.
+    return sampled.sample(frac=1.0, random_state=seed + 1).reset_index(drop=True)
+
+
 def temporal_split_survival(
     survival_df: pd.DataFrame,
     train_frac: float = 0.70,

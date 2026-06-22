@@ -75,9 +75,18 @@ def temporal_split(
     -------
     Tuple of (train_df, valid_df, test_df).
     """
-    last_period = pd.to_datetime(
-        loan_df["last_period"].astype(str), format="%Y%m", errors="coerce"
-    )
+    # last_period may arrive as a YYYYMM integer (build_model_aggregates.py),
+    # a pandas/np datetime (reporting_period max), or a string. Normalize all
+    # three to a datetime before comparing against the cutoffs. Parsing a raw
+    # Timestamp with format="%Y%m" silently coerces every row to NaT, which
+    # would empty all three splits — so branch on dtype.
+    last_period_raw = loan_df["last_period"]
+    if pd.api.types.is_datetime64_any_dtype(last_period_raw):
+        last_period = pd.to_datetime(last_period_raw, errors="coerce")
+    else:
+        last_period = pd.to_datetime(
+            last_period_raw.astype("Int64").astype(str), format="%Y%m", errors="coerce"
+        )
     train_mask = last_period < train_cutoff
     valid_mask = (last_period >= train_cutoff) & (last_period < valid_cutoff)
     test_mask  = last_period >= valid_cutoff
@@ -155,8 +164,18 @@ def train_logistic(
     )
     base_model.fit(x_train, y_train)
 
-    # Platt scaling calibration on validation set (spec §5.2)
-    calibrated_model = CalibratedClassifierCV(base_model, method="sigmoid", cv="prefit")
+    # Platt scaling calibration on a held-out validation set (spec §5.2).
+    # sklearn >=1.6 replaced cv="prefit" with FrozenEstimator; cv="prefit" was
+    # removed entirely in 1.9. Support both so the model trains across versions.
+    try:
+        from sklearn.frozen import FrozenEstimator  # pylint: disable=import-outside-toplevel
+        calibrated_model = CalibratedClassifierCV(
+            FrozenEstimator(base_model), method="sigmoid"
+        )
+    except ImportError:  # sklearn < 1.6
+        calibrated_model = CalibratedClassifierCV(
+            base_model, method="sigmoid", cv="prefit"
+        )
     calibrated_model.fit(x_valid, y_valid)
 
     # Evaluate on validation set
@@ -240,8 +259,11 @@ def compute_shap_values(
     x_bg_scaled  = scaler.transform(x_background)
     x_exp_scaled = scaler.transform(x_explain)
 
-    # Extract the underlying LogisticRegression from the calibrated wrapper
-    inner_lr = model.calibrated_classifiers_[0].estimator
+    # Extract the underlying LogisticRegression from the calibrated wrapper.
+    # On sklearn >=1.6 the prefit estimator is wrapped in a FrozenEstimator, so
+    # unwrap one level (.estimator) to reach the LogisticRegression with coef_.
+    inner = model.calibrated_classifiers_[0].estimator
+    inner_lr = getattr(inner, "estimator", inner)
 
     explainer = _shap.LinearExplainer(inner_lr, x_bg_scaled)
     shap_values = explainer.shap_values(x_exp_scaled)
