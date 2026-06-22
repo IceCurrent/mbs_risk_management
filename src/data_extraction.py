@@ -16,6 +16,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 log = logging.getLogger(__name__)
 
@@ -303,10 +305,14 @@ def parse_all_origination(
     for year, qtr, zip_path in zip_files:
         paths.append(parse_origination_quarter(year, qtr, zip_path, out_dir))
 
+    all_path = out_dir / "origination_all.parquet"
+    if all_path.exists():
+        log.info("Already exists, skipping concat: %s", all_path)
+        return all_path
+
     combined = pd.concat(
         [pd.read_parquet(p) for p in paths], ignore_index=True
     )
-    all_path = out_dir / "origination_all.parquet"
     combined.to_parquet(all_path, index=False)
     log.info(
         "origination_all.parquet: %d rows, %d cols → %s",
@@ -398,10 +404,19 @@ def parse_all_performance(
     for year, qtr, zip_path in zip_files:
         paths.append(parse_performance_quarter(year, qtr, zip_path, out_dir))
 
+    all_path = out_dir / "performance_all.parquet"
+    if all_path.exists():
+        log.info("Already exists, skipping concat: %s", all_path)
+        return all_path
+
+    log.warning(
+        "Concatenating %d performance parquets — requires ~20 GB RAM. "
+        "If this OOMs, read quarterly files directly in build_merged_panel().",
+        len(paths),
+    )
     combined = pd.concat(
         [pd.read_parquet(p) for p in paths], ignore_index=True
     )
-    all_path = out_dir / "performance_all.parquet"
     combined.to_parquet(all_path, index=False)
     log.info(
         "performance_all.parquet: %d rows, %d cols → %s",
@@ -411,6 +426,95 @@ def parse_all_performance(
 
 
 # ── Phase 2c — Merge panel and model-specific subsets ────────────────────────
+
+# Rows read per batch when streaming a quarterly performance file. The big
+# 2020–2021 quarters hold 40–65M rows in a single row group; reading them whole
+# and broadcasting the 31 origination columns over them needs 15+ GB. Streaming
+# in 2M-row batches caps peak RAM at origination (~2 GB) + one batch (~1 GB).
+_PERF_BATCH_ROWS = 2_000_000
+
+
+def _build_subsets_from_quarterly_files(
+    out_dir: Path,
+    logistic_path: Path,
+    cph_path: Path,
+) -> None:
+    """
+    Build model-subset parquets by streaming quarterly performance files.
+
+    Bypasses performance_all.parquet and merged_panel.parquet entirely.
+    Each quarter is read in row-batches (see _PERF_BATCH_ROWS) and merged with
+    origination one batch at a time, so peak RAM stays ~3–4 GB regardless of
+    quarter size — safe on 16 GB machines.
+
+    If interrupted mid-run, delete any partial output files before re-running.
+    """
+    orig = pd.read_parquet(out_dir / "origination_all.parquet")
+    orig["loan_id"] = orig["loan_id"].astype(str).str.strip()
+    orig["orig_quarter"] = pd.to_datetime(
+        orig["first_payment_date"].astype(str), format="%Y%m", errors="coerce"
+    ).dt.to_period("Q")
+
+    quarterly_files = sorted(out_dir.glob("performance_????Q?.parquet"))
+    if not quarterly_files:
+        raise FileNotFoundError(
+            f"No quarterly performance files found in {out_dir}. "
+            "Run parse_all_performance() first."
+        )
+
+    log.info(
+        "Building model subsets from %d quarterly files "
+        "(streaming %d-row batches, peak ~3-4 GB).",
+        len(quarterly_files), _PERF_BATCH_ROWS,
+    )
+
+    # Only build subsets not already on disk; keyed by name → (out_path, cutoff_period)
+    subsets = {k: v for k, v in {
+        "cph":      (cph_path,      "2018Q1"),
+        "logistic": (logistic_path, "2021Q1"),
+    }.items() if not v[0].exists()}
+
+    writers: Dict[str, Optional[pq.ParquetWriter]] = {k: None for k in subsets}
+    rows = {k: 0 for k in subsets}
+
+    def _write(key: str, frame: pd.DataFrame) -> None:
+        """Promote null columns, align to the writer schema, append rows."""
+        tbl = pa.Table.from_pandas(frame, preserve_index=False)
+        # null type only arises from all-NaN object (string) columns in batches
+        # with no events; promote so every batch's schema is consistent.
+        tbl = tbl.cast(pa.schema([
+            f.with_type(pa.string()) if f.type == pa.null() else f
+            for f in tbl.schema
+        ]))
+        if writers[key] is None:
+            writers[key] = pq.ParquetWriter(subsets[key][0], tbl.schema)
+        else:
+            tbl = tbl.cast(writers[key].schema, safe=False)
+        writers[key].write_table(tbl)
+        rows[key] += tbl.num_rows
+
+    try:
+        for qfile in quarterly_files:
+            for batch in pq.ParquetFile(qfile).iter_batches(batch_size=_PERF_BATCH_ROWS):
+                perf = batch.to_pandas()
+                perf["loan_id"] = perf["loan_id"].astype(str).str.strip()
+                merged = perf.merge(orig, on="loan_id", how="left", suffixes=("", "_orig"))
+                merged["reporting_period"] = pd.to_datetime(
+                    merged["reporting_period"].astype(str), format="%Y%m", errors="coerce"
+                )
+                for key, (_, cutoff) in subsets.items():
+                    part = merged[merged["orig_quarter"] >= cutoff]
+                    if len(part):
+                        _write(key, part)
+            log.info("  processed %s", qfile.name)
+    finally:
+        for writer in writers.values():
+            if writer:
+                writer.close()
+
+    for key in subsets:
+        log.info("%s: %d rows", subsets[key][0].name, rows[key])
+
 
 def build_merged_panel(
     orig_path: Optional[Path] = None,
@@ -442,24 +546,67 @@ def build_merged_panel(
     if perf_path is None:
         perf_path = out_dir / "performance_all.parquet"
 
+    out_path = out_dir / "merged_panel.parquet"
+    if out_path.exists():
+        log.info("Already exists, skipping: %s", out_path)
+        return out_path
+
     try:
         orig = pd.read_parquet(orig_path)
-        perf = pd.read_parquet(perf_path)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"Input file not found: {exc}. "
-            "Run parse_all_origination() and parse_all_performance() first."
+            f"origination_all.parquet not found: {exc}. "
+            "Run parse_all_origination() first."
         ) from exc
 
-    # Normalize loan_id to plain string in both tables
     orig["loan_id"] = orig["loan_id"].astype(str).str.strip()
-    perf["loan_id"] = perf["loan_id"].astype(str).str.strip()
 
-    panel = perf.merge(orig, on="loan_id", how="left", suffixes=("", "_orig"))
+    if perf_path.exists():
+        # Direct path — requires ~20 GB RAM; skip to RAM-safe path on 16 GB machines.
+        perf = pd.read_parquet(perf_path)
+        perf["loan_id"] = perf["loan_id"].astype(str).str.strip()
+        panel = perf.merge(orig, on="loan_id", how="left", suffixes=("", "_orig"))
+        panel.to_parquet(out_path, index=False)
+        log.info("merged_panel.parquet: %d rows, %d cols", *panel.shape)
+        return out_path
 
-    out_path = out_dir / "merged_panel.parquet"
-    panel.to_parquet(out_path, index=False)
-    log.info("merged_panel.parquet: %d rows, %d cols", *panel.shape)
+    # RAM-safe fallback: one quarter in memory at a time, write via pyarrow.
+    # Peak usage: origination (~1 GB) + one quarterly file (~3 GB) ≈ 4 GB.
+    quarterly_files = sorted(out_dir.glob("performance_????Q?.parquet"))
+    if not quarterly_files:
+        raise FileNotFoundError(
+            "Neither performance_all.parquet nor quarterly performance files found. "
+            "Run parse_all_performance() first."
+        )
+
+    log.info(
+        "Building merged_panel from %d quarterly files (RAM-safe, peak ~4 GB).",
+        len(quarterly_files),
+    )
+    writer = None
+    total_rows = 0
+    try:
+        for qfile in quarterly_files:
+            perf_q = pd.read_parquet(qfile)
+            perf_q["loan_id"] = perf_q["loan_id"].astype(str).str.strip()
+            chunk = perf_q.merge(orig, on="loan_id", how="left", suffixes=("", "_orig"))
+            table = pa.Table.from_pandas(chunk, preserve_index=False)
+            table = table.cast(pa.schema([
+                f.with_type(pa.string()) if f.type == pa.null() else f
+                for f in table.schema
+            ]))
+            if writer is None:
+                writer = pq.ParquetWriter(out_path, table.schema)
+            else:
+                table = table.cast(writer.schema, safe=False)
+            writer.write_table(table)
+            total_rows += len(chunk)
+            log.info("  %s → %d rows (running total %d)", qfile.name, len(chunk), total_rows)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    log.info("merged_panel.parquet: %d rows → %s", total_rows, out_path)
     return out_path
 
 
@@ -493,30 +640,36 @@ def create_model_subsets(
     if panel_path is None:
         panel_path = out_dir / "merged_panel.parquet"
 
-    try:
-        panel = pd.read_parquet(panel_path)
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(
-            f"Merged panel not found: {exc}. Run build_merged_panel() first."
-        ) from exc
-
-    panel["reporting_period"] = pd.to_datetime(
-        panel["reporting_period"].astype(str), format="%Y%m", errors="coerce"
-    )
-    panel["orig_quarter"] = pd.to_datetime(
-        panel["first_payment_date"].astype(str), format="%Y%m", errors="coerce"
-    ).dt.to_period("Q")
-
-    # Logistic regression + PSA: 2021-2025 originations (spec §4.6)
-    panel_logistic = panel[panel["orig_quarter"] >= "2021Q1"].copy()
     logistic_path = out_dir / "panel_logistic_2021_2025.parquet"
-    panel_logistic.to_parquet(logistic_path, index=False)
-    log.info("panel_logistic_2021_2025.parquet: %d rows", len(panel_logistic))
-
-    # Cox PH: 2018-2025 originations (spec §4.6)
-    panel_cph = panel[panel["orig_quarter"] >= "2018Q1"].copy()
     cph_path = out_dir / "panel_cph_2018_2025.parquet"
-    panel_cph.to_parquet(cph_path, index=False)
-    log.info("panel_cph_2018_2025.parquet: %d rows", len(panel_cph))
 
+    if logistic_path.exists() and cph_path.exists():
+        log.info("Both model subsets already exist, skipping.")
+        return {"logistic": logistic_path, "cph": cph_path}
+
+    if panel_path.exists():
+        # Direct path from merged_panel — may require 15+ GB RAM.
+        panel = pd.read_parquet(panel_path)
+        panel["reporting_period"] = pd.to_datetime(
+            panel["reporting_period"].astype(str), format="%Y%m", errors="coerce"
+        )
+        panel["orig_quarter"] = pd.to_datetime(
+            panel["first_payment_date"].astype(str), format="%Y%m", errors="coerce"
+        ).dt.to_period("Q")
+        if not logistic_path.exists():
+            panel[panel["orig_quarter"] >= "2021Q1"].to_parquet(logistic_path, index=False)
+            log.info("panel_logistic_2021_2025.parquet written")
+        if not cph_path.exists():
+            panel[panel["orig_quarter"] >= "2018Q1"].to_parquet(cph_path, index=False)
+            log.info("panel_cph_2018_2025.parquet written")
+        return {"logistic": logistic_path, "cph": cph_path}
+
+    # RAM-safe fallback: build subsets directly from quarterly performance files.
+    # Bypasses both performance_all.parquet and merged_panel.parquet entirely.
+    # Peak usage: origination (~1 GB) + one quarterly file (~3 GB) ≈ 4 GB.
+    _build_subsets_from_quarterly_files(
+        out_dir=out_dir,
+        logistic_path=logistic_path,
+        cph_path=cph_path,
+    )
     return {"logistic": logistic_path, "cph": cph_path}
