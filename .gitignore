@@ -1,0 +1,48 @@
+# Environment
+.env
+
+# Staging drops before they are filed under data/market/raw/
+data/I collect/
+
+# Local scratch data
+data/processed/
+
+# Issuer and Bloomberg data (large and/or licensed)
+data/market/raw/
+data/market/processed/
+!data/market/raw/.gitkeep
+!data/market/processed/.gitkeep
+
+# FRED cache (re-fetch with: python src/fred_data.py)
+data/fred/*
+!data/fred/.gitkeep
+
+# Generated results and figures
+artifacts/figures/
+artifacts/results/
+
+# Personal notes
+PROGRESS.md
+docs/
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Large archives
+*.zip
+*.gz
+*.tar

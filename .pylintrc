@@ -1,0 +1,20 @@
+[MASTER]
+init-hook='import sys; sys.path.insert(0, "src")'
+
+[FORMAT]
+max-line-length=110
+
+[BASIC]
+# Short names follow the maths in the docstrings (x, y, k, n, p, b, ...).
+good-names=i,j,k,n,p,b,c,t,x,y,z,se,pv,up,dn,hw,f0,f1,t1,t2,sc,lo,hi,_
+
+[DESIGN]
+max-args=10
+max-positional-arguments=10
+max-locals=30
+max-attributes=25
+max-returns=8
+min-public-methods=0
+
+[MESSAGES CONTROL]
+disable=wrong-import-position

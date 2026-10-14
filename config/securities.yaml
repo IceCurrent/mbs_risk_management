@@ -1,0 +1,80 @@
+selection_policy:
+  locked_before_model_validation: true
+  selected_on: "2026-10-10"
+  agency: FNMA
+  product: "30-year fixed-rate single-class UMBS"
+  payment_delay_days: 55
+  issuer_source: "Fannie Mae PoolTalk monthly and at-issuance disclosures"
+  issuer_source_url: "https://pooltalk.fanniemae.com/"
+  discovery_source: "Public agency-pool lookup backed by issuer disclosures"
+  discovery_source_url: "https://www.2folddata.com/tools/pool-lookup"
+  note: >
+    These three pools were locked before OAS calculation. Bloomberg market-data
+    coverage is a go/no-go gate: a failed pool remains a reported failure and is
+    not replaced after residuals are observed. current_upb / factor here are
+    public-lookup rounded discovery values used only for screening; pricing
+    reads issuer snapshots.
+
+securities:
+  - role: primary
+    agency: FNMA
+    cusip: "3140QVLM4"
+    bloomberg_security: "3140QVLM4 Mtge"
+    pool_number: "CB9331"
+    prefix: "CL"
+    coupon: 0.055
+    issue_date: "2024-09-01"
+    maturity_date: "2054-10-01"
+    original_upb: 206600000
+    discovery_as_of: "2026-10-01"
+    current_upb: 181000000
+    factor: 0.875944
+    wac: 0.06539
+    wala: 25
+    wam: 325
+    loan_count: 445
+    latest_cpr: 0.011
+    is_resecuritization: false
+    selection_reason: "Largest simple loan pool in the locked cohort; primary fit security."
+
+  - role: holdout
+    agency: FNMA
+    cusip: "3140QVWQ3"
+    bloomberg_security: "3140QVWQ3 Mtge"
+    pool_number: "CB9654"
+    prefix: "CL"
+    coupon: 0.05
+    issue_date: "2024-11-01"
+    maturity_date: "2054-12-01"
+    original_upb: 174300000
+    discovery_as_of: "2026-10-01"
+    current_upb: 157300000
+    factor: 0.902649
+    wac: 0.06034
+    wala: 23
+    wam: 330
+    loan_count: 386
+    latest_cpr: 0.103
+    is_resecuritization: false
+    selection_reason: "Lower-coupon holdout; same agency, term, prefix and vintage."
+
+  - role: holdout
+    agency: FNMA
+    cusip: "3140AHRE4"
+    bloomberg_security: "3140AHRE4 Mtge"
+    pool_number: "DB7684"
+    prefix: "CL"
+    coupon: 0.06
+    issue_date: "2024-07-01"
+    maturity_date: "2054-07-01"
+    original_upb: 12800000
+    discovery_as_of: "2026-10-01"
+    current_upb: 7900000
+    factor: 0.61806
+    wac: 0.06973
+    wala: 27
+    wam: 325
+    loan_count: 59
+    latest_cpr: 0.008
+    is_resecuritization: false
+    selection_reason: "Higher-coupon holdout; same agency, term, prefix and vintage."

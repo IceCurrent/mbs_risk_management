@@ -1,0 +1,107 @@
+field_policy:
+  terminal_validation_required: true
+  instructions: >
+    Verify every field on the pilot CUSIP with FLDS <GO>. Required fields must
+    return a value or an explicit documented not-applicable result before the
+    three-security pull is accepted.
+
+layout:
+  # Rows reserved per CUSIP on Price_History so a daily BDH cannot spill
+  # into the next pool. Must match src/market_data.py.
+  price_block_height: 1600
+  # BDH Per enum confirmed on the terminal. The word DAILY is rejected.
+  periodicity: D
+
+static_fields:
+  - mnemonic: ID_CUSIP
+    label: CUSIP
+    function: BDP
+    required: true
+    expected_type: text
+  - mnemonic: NAME
+    label: Security name
+    function: BDP
+    required: true
+    expected_type: text
+  - mnemonic: CPN
+    label: Pass-through coupon
+    function: BDP
+    required: true
+    expected_type: percent
+  - mnemonic: ISSUE_DT
+    label: Issue date
+    function: BDP
+    required: true
+    expected_type: date
+  - mnemonic: MATURITY
+    label: Final maturity
+    function: BDP
+    required: true
+    expected_type: date
+  - mnemonic: MTG_FACTOR
+    label: Current pool factor
+    function: BDP
+    required: true
+    expected_type: decimal
+  - mnemonic: MTG_FACTOR_DT
+    label: Current factor date
+    function: BDP
+    required: true
+    expected_type: date
+  - mnemonic: MTG_WAC
+    label: Weighted-average note rate
+    function: BDP
+    required: false
+    expected_type: percent
+  - mnemonic: MTG_WAM
+    label: Weighted-average remaining maturity
+    function: BDP
+    required: false
+    expected_type: integer
+  # MTG_WALA returned #N/A Invalid Field on 3140QVLM4 Mtge. Do not add it back
+  # without a FLDS hit. Loan age comes from the issuer disclosure.
+  - mnemonic: AMT_OUTSTANDING
+    label: Current amount outstanding
+    function: BDP
+    required: false
+    expected_type: currency
+
+historical_fields:
+  # Terminal result on 3140QVLM4 Mtge: #N/A Field Not Applicable.
+  # Two-sided PX_BID/PX_ASK history is the market source for these pools.
+  - mnemonic: BVAL_MID_PRICE
+    label: BVAL evaluated mid
+    function: BDH
+    required: false
+    quality_tier: evaluated
+  - mnemonic: PX_BID
+    label: Bid price
+    function: BDH
+    required: false
+    quality_tier: quote
+  - mnemonic: PX_ASK
+    label: Ask price
+    function: BDH
+    required: false
+    quality_tier: quote
+  - mnemonic: PX_LAST
+    label: Last price
+    function: BDH
+    required: false
+    quality_tier: diagnostic
+  - mnemonic: OAS_SPREAD_MID
+    label: Bloomberg mid OAS
+    function: BDH
+    required: false
+    quality_tier: external_model
+  - mnemonic: Z_SPRD_MID
+    label: Bloomberg mid Z-spread
+    function: BDH
+    required: false
+    quality_tier: external_model
+
+bulk_fields:
+  - mnemonic: MTG_HIST_FACT
+    label: Historical pool factors
+    function: BDS
+    required: true
